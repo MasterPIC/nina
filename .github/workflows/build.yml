@@ -1,4 +1,4 @@
-name: Version Increment and Release
+name: Build NINA (fork)
 
 on:
   workflow_dispatch:
@@ -7,133 +7,12 @@ env:
   BUILD_CONFIG: SignedRelease
 
 jobs:
-  versioning:
-    name: Bump Version
-    runs-on: windows-latest
-    permissions:
-      contents: write
-    outputs:
-      version: ${{ steps.bump_version.outputs.version }}
-      release_channel: ${{ steps.bump_version.outputs.release_channel }}
-      commit_sha: ${{ steps.bump_version.outputs.commit_sha }}
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-        fetch-depth: 0   # Importante per avere tutti i commit dei submodule
-        
-    - name: Bump and export version in CommonAssemblyInfo.cs
-      id: bump_version
-      shell: pwsh
-      run: |
-        $file = "CommonAssemblyInfo.cs"
-
-        if (-not (Test-Path $file)) {
-            Write-Error "File not found: $file"
-            exit 1
-        }
-
-        $content = Get-Content $file -Raw
-
-        # Match and increment the version (assuming 1-based indexing)
-        $versionPattern = '\[assembly: AssemblyVersion\("(\d+)\.(\d+)\.(\d+)\.(\d+)"\)\]'
-        $match = [regex]::Match($content, $versionPattern)
-        if (-not $match.Success) {
-            Write-Error "AssemblyVersion not found in $file"
-            exit 1
-        }
-
-        $major = $match.Groups[1].Value
-        $minor = $match.Groups[2].Value
-        $patch = $match.Groups[3].Value
-        $build = [int]$match.Groups[4].Value + 1
-        $releaseVersion = "$major.$minor.$patch.$build"
-
-        $channelDigit = $build.ToString().Substring(0,1)
-        switch ($channelDigit) {
-            '1' { $assemblyPostfix = '-nightly' }
-            '2' { $assemblyPostfix = '-beta' }
-            '3' { $assemblyPostfix = '-rc' }
-            '9' { $assemblyPostfix = '' }
-            default {
-            Write-Error "Unknown channel digit: $channelDigit"
-            exit 1
-            }
-        }
-        switch ($channelDigit) {
-          '1' { $channelName = 'Nightlies' }
-          '2' { $channelName = 'Betas' }
-          '3' { $channelName = 'Betas' }
-          '9' { $channelName = 'Releases' }
-            default {
-            Write-Error "Unknown channel digit: $channelDigit"
-            exit 1
-            }
-        }
-
-        # Replace all relevant lines
-        $content = $content -replace '\[assembly: AssemblyVersion\(".*?"\)\]', "[assembly: AssemblyVersion(`"$releaseVersion`")]"
-        $content = $content -replace '\[assembly: AssemblyFileVersion\(".*?"\)\]', "[assembly: AssemblyFileVersion(`"$releaseVersion`")]"
-        $content = $content -replace '\[assembly: AssemblyInformationalVersion\(".*?"\)\]', "[assembly: AssemblyInformationalVersion(`"$releaseVersion$assemblyPostfix`")]"
-
-        Set-Content -Path $file -Value $content -Encoding UTF8
-        
-        $csprojFiles = Get-ChildItem -Path . -Filter *.csproj -Recurse | Where-Object { $_.Name -like 'NINA*' -or $_.Name -eq 'nikoncswrapper.csproj' }
-        foreach ($csproj in $csprojFiles) {
-            [xml]$proj = Get-Content $csproj.FullName
-
-            # No namespace case (SDK-style projects):
-            if ($proj.Project.PropertyGroup) {
-                $changed = $false
-                foreach ($pg in $proj.Project.PropertyGroup) {
-                    if ($pg.Version) {
-                        $pg.Version = "$releaseVersion$assemblyPostfix"
-                        $changed = $true
-                    }
-                }
-                if ($changed) {
-                    $proj.Save($csproj.FullName)
-                    Write-Host "🔄 Updated <Version> in $($csproj.Name) to $releaseVersion$assemblyPostfix"
-                    git add $csproj.FullName
-                }
-            }
-        }
-
-        echo "✅ Bumped to version $releaseVersion"
-        echo "VERSION=$releaseVersion" >> $env:GITHUB_ENV
-        echo "RELEASE_CHANNEL=$channelName" >> $env:GITHUB_ENV
-        echo "release_channel=$channelName" >> $env:GITHUB_OUTPUT
-        echo "version=$releaseVersion" >> $env:GITHUB_OUTPUT
-
-        git config user.name "GitHub Actions"
-        git config user.email "actions@github.com"
-        git add $file
-        git commit -m "Bump version to $releaseVersion"
-        git push
-
-        $commitSha = git rev-parse HEAD
-        echo "commit_sha=$commitSha" >> $env:GITHUB_OUTPUT
-
-
-    - name: Show version
-      shell: pwsh
-      run: echo "✅ Version is $env:VERSION"
-
-    - name: Show release channel
-      shell: pwsh
-      run: echo "✅ Release channel is $env:RELEASE_CHANNEL"
-
   build:
-    name: Build and Prepare Setup
-    needs: versioning
+    name: Build NINA
     runs-on: windows-latest
-    environment:
-      name: build-release
 
     steps:
-    - name: Checkout repository
+    - name: Checkout repository (LFS + submodules)
       uses: nschloe/action-cached-lfs-checkout@v1
       with:
         submodules: recursive
@@ -152,123 +31,45 @@ jobs:
         python -m pip install --upgrade pip
         pip install mkdocs mkdocs-material
 
-    - name: Install WiX Toolset 4 CLI and extensions
+    - name: Install WiX Toolset 4
       run: |
         dotnet tool install --global wix --version 4.0.5
         wix --version
-    
+
     - name: Install Pandoc
       run: choco install pandoc -y
 
     - name: Restore NuGet packages
       run: dotnet restore NINA.sln
-      
+
     - name: Generate release notes
       run: |
         pandoc RELEASE_NOTES.md -f markdown -t rtf -s -o RELEASE_NOTES.rtf
-        pandoc RELEASE_NOTES.md -f markdown -t html -s -o RELEASE_NOTES.html --template md-template.html --metadata title="Nighttime Imaging 'N' Astronomy"
+        pandoc RELEASE_NOTES.md -f markdown -t html -s -o RELEASE_NOTES.html
 
-    - name: Build NINA project
+    - name: Build NINA
       run: dotnet build NINA\NINA.csproj -c ${{ env.BUILD_CONFIG }} -r win-x64
 
-    - name: Copy Canon and Nikon DLLs to build output
-      shell: cmd
-      run: |
-        if exist NINA\External\x64\Canon xcopy NINA\External\x64\Canon NINA\bin\${{ env.BUILD_CONFIG }}\net10.0-windows\win-x64\External\x64\Canon /h/i/c/k/e/r/y
-        if exist NINA\External\x64\Nikon xcopy NINA\External\x64\Nikon NINA\bin\${{ env.BUILD_CONFIG }}\net10.0-windows\win-x64\External\x64\Nikon /h/i/c/k/e/r/y
-
     - name: Build MkDocs documentation
-      run: |
-        mkdocs build -f NINA.Docs\mkdocs-nopdf.yml -c
+      run: mkdocs build -f NINA.Docs\mkdocs-nopdf.yml -c
 
-    - name: Copy MkDocs output to setup target dir
+    - name: Copy docs to build output
       shell: cmd
       run: |
         mkdir NINA\bin\${{ env.BUILD_CONFIG }}\net10.0-windows\win-x64\docs
-        xcopy "NINA.Docs\site" "NINA\bin\${{ env.BUILD_CONFIG }}\net10.0-windows\win-x64\docs" /h/i/c/k/e/r/y
+        xcopy NINA.Docs\site NINA\bin\${{ env.BUILD_CONFIG }}\net10.0-windows\win-x64\docs /h/i/c/k/e/r/y
 
     - name: Build WiX Setup Bundle
-      run: dotnet msbuild NINA.SetupBundle\NINA.SetupBundle.wixproj /p:Configuration=${{ env.BUILD_CONFIG }} /p:Platform=x64 /p:AllowUnsafeBlocks=true
+      run: dotnet msbuild NINA.SetupBundle\NINA.SetupBundle.wixproj /p:Configuration=${{ env.BUILD_CONFIG }} /p:Platform=x64
 
-    - name: Copy .pdb files to setup output folder
+    - name: Create installer ZIP
       run: |
-        $solutionDir = "$(Resolve-Path .)"
-        $pdbSource = "$solutionDir\NINA\bin\${{ env.BUILD_CONFIG }}\net10.0-windows\win-x64"
-        $pdbTarget = "$solutionDir\NINA.SetupBundle\bin\x64\${{ env.BUILD_CONFIG }}"
+        Compress-Archive `
+          NINA.SetupBundle\bin\x64\${{ env.BUILD_CONFIG }}\*.exe `
+          NINASetupBundle.zip
 
-        Remove-Item "$solutionDir\RELEASE_NOTES.rtf" -Force -ErrorAction SilentlyContinue
-
-        $pdbFiles = @(
-          "NINA.pdb",
-          "NINA.Astrometry.pdb",
-          "NINA.Core.pdb",
-          "NINA.Equipment.pdb",
-          "NINA.Image.pdb",
-          "NINA.MGEN.pdb",
-          "NINA.Platesolving.pdb",
-          "NINA.Profile.pdb",
-          "NINA.Sequencer.pdb",
-          "NINA.WPF.Base.pdb",
-          "NINA.CustomControlLibrary.pdb",
-          "NINA.Plugin.pdb"
-        )
-
-        foreach ($file in $pdbFiles) {
-          Write-Host "Copying $file to setup output"
-          Copy-Item "$pdbSource\$file" "$pdbTarget\$file" -Force
-        }
-      
-    - name: Pack all nugets
-      run: |
-        dotnet pack .\nikoncswrapper\nikoncswrapper.csproj -c ${{ env.BUILD_CONFIG }} --output publish
-        dotnet pack .\NINA.Core\NINA.Core.csproj -c ${{ env.BUILD_CONFIG }} --output publish
-        dotnet pack .\NINA.Astrometry\NINA.Astrometry.csproj -c ${{ env.BUILD_CONFIG }} --output publish
-        dotnet pack .\NINA.Equipment\NINA.Equipment.csproj -c ${{ env.BUILD_CONFIG }} --output publish
-        dotnet pack .\NINA.Image\NINA.Image.csproj -c ${{ env.BUILD_CONFIG }} --output publish
-        dotnet pack .\NINA.MGEN\NINA.MGEN.csproj -c ${{ env.BUILD_CONFIG }} --output publish
-        dotnet pack .\NINA.PlateSolving\NINA.PlateSolving.csproj -c ${{ env.BUILD_CONFIG }} --output publish
-        dotnet pack .\NINA.Profile\NINA.Profile.csproj -c ${{ env.BUILD_CONFIG }} --output publish
-        dotnet pack .\NINA.Sequencer\NINA.Sequencer.csproj -c ${{ env.BUILD_CONFIG }} --output publish
-        dotnet pack .\NINA.WPF.Base\NINA.WPF.Base.csproj -c ${{ env.BUILD_CONFIG }} --output publish
-        dotnet pack .\NINA.CustomControlLibrary\NINA.CustomControlLibrary.csproj -c ${{ env.BUILD_CONFIG }} --output publish
-        dotnet pack .\NINA.Plugin\NINA.Plugin.csproj -c ${{ env.BUILD_CONFIG }} --output publish
-
-    - name: Create ZIP files
-      run: |
-        $version = "${{ needs.versioning.outputs.version }}"
-        $outputPath = "NINA.SetupBundle\bin\x64\${{ env.BUILD_CONFIG }}"
-        Compress-Archive -Path "$outputPath\*.exe" -DestinationPath "NINASetupBundle_$version.zip"
-        Compress-Archive -Path "$outputPath\*.pdb" -DestinationPath "NINAPdb_x64_$version.zip"
-
-    - name: Upload zipped installer
+    - name: Upload installer artifact
       uses: actions/upload-artifact@v4
       with:
-        name: zipped-installer
-        path: "NINASetupBundle_${{ needs.versioning.outputs.version }}.zip"
-        retention-days: 1
-        if-no-files-found: error
-
-    - name: Upload zipped symbols
-      uses: actions/upload-artifact@v4
-      with:
-        name: zipped-symbols
-        path: "NINAPdb_x64_${{ needs.versioning.outputs.version }}.zip"
-        retention-days: 1
-        if-no-files-found: error
-
-    - name: Upload release notes
-      uses: actions/upload-artifact@v4
-      with:
-        name: release-notes
-        path: |
-          RELEASE_NOTES.html
-        retention-days: 1
-
-    - name: Upload NuGet packages
-      uses: actions/upload-artifact@v4
-      with:
-        name: nugets
-        path: |
-          publish/*.nupkg
-          publish/*.snupkg
-        retention-days: 1
+        name: NINA-installer
+        path: NINASetupBundle.zip
