@@ -136,7 +136,6 @@ jobs:
     - name: Checkout repository
       uses: nschloe/action-cached-lfs-checkout@v1
       with:
-        ref: ${{ needs.versioning.outputs.commit_sha }}                
         submodules: recursive
         fetch-depth: 0
 
