@@ -20,7 +20,10 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-
+      with:
+        submodules: recursive
+        fetch-depth: 0   # Importante per avere tutti i commit dei submodule
+        
     - name: Bump and export version in CommonAssemblyInfo.cs
       id: bump_version
       shell: pwsh
