@@ -48,7 +48,7 @@ jobs:
         pandoc RELEASE_NOTES.md -f markdown -t html -s -o RELEASE_NOTES.html
 
     - name: Build NINA
-      run: dotnet build NINA\NINA.csproj -c ${{ env.BUILD_CONFIG }} -r win-x64
+      run: dotnet build NINA\NINA.csproj -c ${{ env.BUILD_CONFIG }} -r win-x64  /p:AllowUnsafeBlocks=true
 
     - name: Build MkDocs documentation
       run: mkdocs build -f NINA.Docs\mkdocs-nopdf.yml -c
