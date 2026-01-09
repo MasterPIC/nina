@@ -138,6 +138,7 @@ jobs:
       with:
         ref: ${{ needs.versioning.outputs.commit_sha }}                
         submodules: recursive
+        fetch-depth: 0
 
     - name: Set up MSBuild
       uses: microsoft/setup-msbuild@v2
